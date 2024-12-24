@@ -125,6 +125,15 @@ void Usart_HAL_Init(COMPORT portNum,PortSpeed speed ,PortConfig config, PortMode
 		
 		//Enable USART
 		USART_Cmd(USARTx, ENABLE);
+		
+		NVIC_InitTypeDef NVIC_InitStructure;
+    NVIC_InitStructure.NVIC_IRQChannel = USARTx_IRQn;
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+
+    USART_ITConfig(USARTx, USART_IT_RXNE, ENABLE); // Enable RXNE interrupt
 }
 
 
@@ -151,9 +160,63 @@ char* Serial_HAL_ReadString(COMPORT comPort, int length){
 	}
 	return receiveBuffer;
 }
+#define TX_BUFFER_SIZE 128
+#define RX_BUFFER_SIZE 128
 
-void Serial_HAL_ITPrintString(COMPORT comPort, const char* msg , int length){
-	 USART_TypeDef* USARTx = Get_Usart(comPort);
-   USART_ITConfig(USARTx, USART_IT_TXE, ENABLE);
+volatile uint8_t txBuffer[TX_BUFFER_SIZE];
+volatile uint8_t rxBuffer[RX_BUFFER_SIZE];
+volatile int txHead = 0, txTail = 0;
+volatile int rxHead = 0, rxTail = 0;
+volatile int txLength = 0, rxLength = 0;
+volatile int txBusy = 0;
+
+void Serial_HAL_ITPrintString(COMPORT comPort, const char* msg, int length) {
+    USART_TypeDef* USARTx = Get_Usart(comPort);
+    for (int i = 0; i < length; i++) {
+        while (txLength >= TX_BUFFER_SIZE); // Wait if the buffer is full
+        txBuffer[txHead] = msg[i];
+        txHead = (txHead + 1) % TX_BUFFER_SIZE;
+        txLength++;
+    }
+
+    if (!txBusy) {
+        txBusy = 1;
+        USART_ITConfig(USARTx, USART_IT_TXE, ENABLE); // Enable TXE interrupt
+    }
 }
-char* Serial_HAL_ITReadString(COMPORT comPort, int length);
+
+
+void USARTx_IRQHandler(void) {
+    if (USART_GetITStatus(USART1, USART_IT_TXE) != RESET) {
+        if (txLength > 0) {
+            USART_SendData(USART1, txBuffer[txTail]);
+            txTail = (txTail + 1) % TX_BUFFER_SIZE;
+            txLength--;
+        } else {
+            USART_ITConfig(USART1, USART_IT_TXE, DISABLE); // Disable TXE interrupt
+            txBusy = 0;
+        }
+    }
+
+    if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET) {
+        uint8_t data = USART_ReceiveData(USART1);
+        rxBuffer[rxHead] = data;
+        rxHead = (rxHead + 1) % RX_BUFFER_SIZE;
+        if (rxLength < RX_BUFFER_SIZE) {
+            rxLength++;
+        }
+    }
+}
+
+
+char* Serial_HAL_ITReadString(COMPORT comPort, int length) {
+    USART_TypeDef* USARTx = Get_Usart(comPort);
+    char* receiveBuffer = (char*)malloc(length * sizeof(char));
+    for (int i = 0; i < length; i++) {
+        while (rxLength <= 0); // attendre s'il n y a pas de donnees disponibles
+        receiveBuffer[i] = rxBuffer[rxTail];
+        rxTail = (rxTail + 1) % RX_BUFFER_SIZE;
+        rxLength--;
+    }
+    return receiveBuffer;
+}
